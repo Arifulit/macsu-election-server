@@ -323,7 +323,33 @@ app.get("/api/candidates", async (req, res) => {
   const candidates = await Candidate.find();
   res.json(candidates);
 });
+// ...existing code...
+app.post("/api/votes", authMiddleware, async (req, res) => {
+  try {
+    const { candidateId } = req.body;
+    if (!candidateId) return res.status(400).json({ error: "Missing candidateId" });
 
+    const voter = await Voter.findById(req.userId);
+    if (voter && voter.voted) return res.status(400).json({ error: "You have already voted" });
+
+    const candidate = await Candidate.findById(candidateId);
+    if (!candidate) return res.status(404).json({ error: "Candidate not found" });
+
+    candidate.votes = (candidate.votes || 0) + 1;
+    await candidate.save();
+
+    if (voter) {
+      voter.voted = true;
+      await voter.save();
+    }
+
+    return res.json({ message: "Vote cast successfully" });
+  } catch (err) {
+    console.error("Vote error:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+// ...existing code...
 
 
 app.post("/api/election-config", authMiddleware, async (req, res) => {
