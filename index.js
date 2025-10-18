@@ -541,6 +541,73 @@ app.post("/api/vote/:id", authMiddleware, async (req, res) => {
   res.json({ message: "Vote cast successfully" });
 });
 
+// ...existing code...
+
+// Update candidate (admin only)
+app.patch("/api/candidates/:id", authMiddleware, async (req, res) => {
+  try {
+    if (req.userRole !== "admin") return res.status(403).json({ ok: false, error: "Forbidden: admin only" });
+
+    const { id } = req.params;
+    const allowed = ["position", "name", "studentId", "department", "photoUrl", "displayOrder", "manifesto", "party", "symbol"];
+    const updates = {};
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+
+    const updated = await Candidate.findByIdAndUpdate(id, updates, { new: true });
+    if (!updated) return res.status(404).json({ ok: false, error: "Candidate not found" });
+
+    return res.json({ ok: true, message: "Candidate updated", updatedCandidate: updated });
+  } catch (err) {
+    console.error("Error updating candidate:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Delete candidate (admin only) - also remove references from voters
+// ...existing code...
+app.delete("/api/candidates/:id", authMiddleware, async (req, res) => {
+  try {
+    if (req.userRole !== "admin") return res.status(403).json({ ok: false, error: "Forbidden: admin only" });
+
+    const rawId = String(req.params.id || "").trim();
+    if (!rawId) return res.status(400).json({ ok: false, error: "Missing candidate id" });
+
+    // validate ObjectId
+    if (!mongoose.isValidObjectId(rawId)) {
+      return res.status(400).json({ ok: false, error: "Invalid candidate id format" });
+    }
+
+    // find candidate
+    const candidate = await Candidate.findById(rawId);
+    console.log("Delete candidate request for id:", rawId, "found:", !!candidate);
+    if (!candidate) return res.status(404).json({ ok: false, error: "Candidate not found" });
+
+    // remove candidate document
+    await Candidate.deleteOne({ _id: rawId });
+
+    const oid = new mongoose.Types.ObjectId(rawId);
+
+    // remove references from voters: votedCandidates array and voted entries
+    await Voter.updateMany(
+      { $or: [{ votedCandidates: oid }, { "voted.candidate": oid }] },
+      {
+        $pull: {
+          votedCandidates: oid,
+          voted: { candidate: oid },
+        },
+      }
+    );
+
+    return res.json({ ok: true, message: "Candidate deleted and voter references cleaned", deletedCandidateId: rawId });
+  } catch (err) {
+    console.error("Error deleting candidate:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+// ...existing code...
+
 // ==============================
 // 🏠 Root Route
 // ==============================
