@@ -53,7 +53,15 @@ const VoterSchema = new mongoose.Schema({
   name: String,
   nid: String,
   address: String,
-  voted: { type: Boolean, default: false },
+  // keep list of voted candidate ids (legacy) and per-position votes
+  votedCandidates: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Candidate" }], default: [] },
+  // per-position votes: array of { position, candidate }
+  voted: [
+    {
+      position: { type: String },
+      candidate: { type: mongoose.Schema.Types.ObjectId, ref: "Candidate" },
+    },
+  ],
 });
 
 const Voter = mongoose.model("Voter", VoterSchema);
@@ -187,7 +195,8 @@ app.post("/api/auth/register", async (req, res) => {
         refreshToken,
       },
     });
-  } catch (err) {
+  } 
+  catch (err) {
     console.error("Register error:", err);
     return res.status(500).json({ ok: false, error: "Server error" });
   }
@@ -266,8 +275,14 @@ app.post("/api/auth/refresh", async (req, res) => {
 });
 
 // Logout (invalidate refresh token)
-app.post("/api/auth/logout", async (req, res) => {
-  const { refreshToken } = req.body;
+// ...existing code...
+// Optional helper: allow logout via GET for quick testing (not recommended for production)
+app.get("/api/auth/logout", async (req, res) => {
+  // accept refreshToken as query ?refreshToken=... or as Authorization: Bearer <token>
+  const refreshToken =
+    req.query.refreshToken ||
+    (req.headers.authorization ? req.headers.authorization.split(" ")[1] : null);
+
   if (!refreshToken) return res.json({ ok: true });
 
   try {
@@ -278,10 +293,12 @@ app.post("/api/auth/logout", async (req, res) => {
       await user.save();
     }
   } catch (err) {
-    // ignore invalid token on logout
+    // ignore invalid token
   }
-  return res.json({ ok: true });
+
+  return res.json({ ok: true, message: "Logout successful" });
 });
+// ...existing code...
 
 
 // Verify Code
@@ -323,27 +340,89 @@ app.get("/api/candidates", async (req, res) => {
   const candidates = await Candidate.find();
   res.json(candidates);
 });
-// ...existing code...
+
+
+
+
+
+
+
+// Replace /api/votes handler with position-aware logic
 app.post("/api/votes", authMiddleware, async (req, res) => {
   try {
-    const { candidateId } = req.body;
+    let { candidateId } = req.body;
     if (!candidateId) return res.status(400).json({ error: "Missing candidateId" });
 
-    const voter = await Voter.findById(req.userId);
-    if (voter && voter.voted) return res.status(400).json({ error: "You have already voted" });
+    // accept single id or array of ids
+    const candidateIds = Array.isArray(candidateId) ? candidateId : [candidateId];
 
-    const candidate = await Candidate.findById(candidateId);
-    if (!candidate) return res.status(404).json({ error: "Candidate not found" });
-
-    candidate.votes = (candidate.votes || 0) + 1;
-    await candidate.save();
-
-    if (voter) {
-      voter.voted = true;
-      await voter.save();
+    // load or create voter (use same _id as User)
+    let voter = await Voter.findById(req.userId);
+    if (!voter) {
+      const user = await User.findById(req.userId).select("fullName email");
+      voter = new Voter({
+        _id: req.userId,
+        name: user?.fullName || user?.email || "",
+        votedCandidates: [],
+        voted: [],
+      });
     }
 
-    return res.json({ message: "Vote cast successfully" });
+    // fetch election config to determine max votes per voter (total)
+    const config = await ElectionConfig.findOne();
+      const maxVotes = (config && config.maxVotesPerVoter) ? config.maxVotesPerVoter : Infinity; // if not set, allow any positions
+
+    // Build current voted positions set
+    const votedPositions = new Set((voter.voted || []).map((v) => v.position));
+
+    // Validate candidate ids, gather positions
+    const candidates = await Candidate.find({ _id: { $in: candidateIds } });
+    if (candidates.length !== candidateIds.length) {
+      return res.status(404).json({ error: "One or more candidates not found" });
+    }
+
+    // check for attempting to vote multiple candidates for same position in this request
+    const positionsInRequest = {};
+    for (const c of candidates) {
+      const pos = c.position || ""; // treat empty as position-less
+      if (positionsInRequest[pos]) {
+        return res.status(400).json({ error: `Multiple candidates for same position in request: ${pos}` });
+      }
+      positionsInRequest[pos] = true;
+    }
+
+    // check per-position already voted and total max votes
+    const newPositions = candidates.map((c) => c.position || "");
+    // if any position already voted by this voter -> error
+    for (const pos of newPositions) {
+      if (votedPositions.has(pos)) {
+        return res.status(400).json({ error: `You have already voted for position: ${pos}` });
+      }
+    }
+
+    // enforce total votes limit if configured (count existing + new)
+ if (!config?.allowMultiplePositions) {
+      const totalAfter = (voter.voted.length || 0) + newPositions.length;
+      if (Number.isFinite(maxVotes) && totalAfter > maxVotes) {
+        return res.status(400).json({ error: `Vote limit exceeded. Max votes allowed: ${maxVotes}` });
+      }
+    }
+
+    // apply votes: increment candidate.votes and record voter's per-position vote
+    for (const c of candidates) {
+      c.votes = (c.votes || 0) + 1;
+      await c.save();
+
+      voter.votedCandidates.push(c._id); // legacy list
+      voter.voted.push({ position: c.position || "", candidate: c._id });
+    }
+
+    await voter.save();
+
+    return res.json({
+      message: "Vote cast successfully",
+      voted: voter.voted,
+    });
   } catch (err) {
     console.error("Vote error:", err);
     return res.status(500).json({ error: "Server error" });
