@@ -17,9 +17,14 @@ const REFRESH_SECRET = process.env.REFRESH_SECRET || (JWT_SECRET + "_refresh");
 // ==============================
 // 🧩 Middleware
 // ==============================
-app.use(cors());
+app.use(cors({
+  origin: ["http://localhost:5173", "http://localhost:3000"], // your frontend origins
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+  credentials: true,
+}));
 app.use(express.json());
-
+app.options("*", cors());
 // ==============================
 // 🌍 MongoDB Connection
 // ==============================
@@ -104,17 +109,22 @@ const ElectionConfig = mongoose.model("ElectionConfig", ElectionConfigSchema);
 // ==============================
 // 🔐 Auth Middleware
 // ==============================
-function authMiddleware(req, res, next) {
-  const auth = req.headers.authorization;
-  if (!auth) return res.status(401).json({ error: "No token provided" });
 
-  const token = auth.split(" ")[1];
+function authMiddleware(req, res, next) {
+  // accept Authorization header, x-access-token, or ?token for quick tests
+  const authHeader = req.headers.authorization || req.headers["x-access-token"] || req.query.token;
+  if (!authHeader) return res.status(401).json({ error: "No token provided" });
+
+  const token = authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : authHeader;
+
   try {
     const payload = jwt.verify(token, JWT_SECRET);
     req.userId = payload.id;
     req.userRole = payload.role;
     next();
   } catch (err) {
+    console.error("Auth error:", err.message);
+    if (err.name === "TokenExpiredError") return res.status(401).json({ error: "Token expired" });
     return res.status(401).json({ error: "Invalid token" });
   }
 }
@@ -132,7 +142,7 @@ function generateCode() {
 
 
 // Register
-// ...existing code...
+
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { email, password, fullName, role } = req.body;
@@ -170,7 +180,7 @@ app.post("/api/auth/register", async (req, res) => {
     const accessToken = jwt.sign(
       { id: user._id, email: user.email, role: user.role },
       JWT_SECRET,
-      { expiresIn: "15m" }
+      { expiresIn: "40m" }
     );
     const refreshToken = jwt.sign(
       { id: user._id },
@@ -217,7 +227,7 @@ app.post("/api/auth/login", async (req, res) => {
     const accessToken = jwt.sign(
       { id: user._id, email: user.email, role: user.role },
       JWT_SECRET,
-      { expiresIn: "15m" }
+      { expiresIn: "40m" }
     );
 
     const refreshToken = jwt.sign(
@@ -265,7 +275,7 @@ app.post("/api/auth/refresh", async (req, res) => {
     const accessToken = jwt.sign(
       { id: user._id, email: user.email, role: user.role },
       JWT_SECRET,
-      { expiresIn: "15m" }
+      { expiresIn: "40m" }
     );
 
     return res.json({ accessToken });
@@ -274,8 +284,7 @@ app.post("/api/auth/refresh", async (req, res) => {
   }
 });
 
-// Logout (invalidate refresh token)
-// ...existing code...
+
 // Optional helper: allow logout via GET for quick testing (not recommended for production)
 app.get("/api/auth/logout", async (req, res) => {
   // accept refreshToken as query ?refreshToken=... or as Authorization: Bearer <token>
@@ -298,8 +307,6 @@ app.get("/api/auth/logout", async (req, res) => {
 
   return res.json({ ok: true, message: "Logout successful" });
 });
-// ...existing code...
-
 
 // Verify Code
 app.post("/api/auth/verify", async (req, res) => {
@@ -340,8 +347,6 @@ app.get("/api/candidates", async (req, res) => {
   const candidates = await Candidate.find();
   res.json(candidates);
 });
-
-
 
 
 
@@ -428,8 +433,6 @@ app.post("/api/votes", authMiddleware, async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
-// ...existing code...
-
 
 app.post("/api/election-config", authMiddleware, async (req, res) => {
   try {
@@ -457,14 +460,6 @@ app.get("/api/election-config", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
-
-
-// Add new candidate
-// ...existing code...
-
-
-// Add new candidate (admin only)
-
 
 // Add new candidate (admin only)
 app.post("/api/candidates", authMiddleware, async (req, res) => {
@@ -510,8 +505,13 @@ app.post("/api/candidates", authMiddleware, async (req, res) => {
 });
 
 // Results route
-app.get("/api/results", async (req, res) => {
+app.get("/api/results", authMiddleware, async (req, res) => {
   try {
+    // only admin can view results
+    if (req.userRole !== "admin") {
+      return res.status(403).json({ error: "Forbidden: admin only" });
+    }
+
     const candidates = await Candidate.find().sort({ votes: -1 });
     const totalVotes = candidates.reduce((sum, c) => sum + (c.votes || 0), 0);
     return res.json({ totalVotes, candidates });
@@ -520,6 +520,7 @@ app.get("/api/results", async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 });
+
 // Cast a vote
 app.post("/api/vote/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
@@ -541,7 +542,6 @@ app.post("/api/vote/:id", authMiddleware, async (req, res) => {
   res.json({ message: "Vote cast successfully" });
 });
 
-// ...existing code...
 
 // Update candidate (admin only)
 app.patch("/api/candidates/:id", authMiddleware, async (req, res) => {
@@ -566,7 +566,6 @@ app.patch("/api/candidates/:id", authMiddleware, async (req, res) => {
 });
 
 // Delete candidate (admin only) - also remove references from voters
-// ...existing code...
 app.delete("/api/candidates/:id", authMiddleware, async (req, res) => {
   try {
     if (req.userRole !== "admin") return res.status(403).json({ ok: false, error: "Forbidden: admin only" });
@@ -603,6 +602,40 @@ app.delete("/api/candidates/:id", authMiddleware, async (req, res) => {
     return res.json({ ok: true, message: "Candidate deleted and voter references cleaned", deletedCandidateId: rawId });
   } catch (err) {
     console.error("Error deleting candidate:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Get voter's votes
+app.get("/api/votes/:voterId", authMiddleware, async (req, res) => {
+  try {
+    const rawId = String(req.params.voterId || "").trim();
+    // allow "me" as shortcut
+    const requestedVoterId = rawId === "me" ? req.userId : rawId;
+
+    if (!mongoose.isValidObjectId(requestedVoterId)) {
+      return res.status(400).json({ error: "Invalid voter id" });
+    }
+
+    // only voters can fetch their own votes
+    if (req.userRole !== "voter" && String(requestedVoterId) !== String(req.userId)) {
+      return res.status(403).json({ error: "Forbidden: cannot access other voter's votes" });
+    }
+
+    const voter = await Voter.findById(requestedVoterId)
+      .populate("voted.candidate")
+      .populate("votedCandidates");
+
+    if (!voter) return res.status(404).json({ error: "Voter not found" });
+
+    return res.json({
+      id: voter._id,
+      name: voter.name,
+      votedCandidates: voter.votedCandidates,
+      voted: voter.voted,
+    });
+  } catch (err) {
+    console.error("Get voter votes error:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
